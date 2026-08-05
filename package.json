@@ -1,0 +1,12 @@
+{
+  "name": "workday-resume-fixer",
+  "version": "1.0.1",
+  "private": true,
+  "description": "Tests for the Workday Resume Fixer userscript. The userscript itself has no dependencies — it is installed through Tampermonkey, not npm.",
+  "scripts": {
+    "test": "node test/real-pages.test.js && node test/variants.test.js && node test/synthetic.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1"
+  }
+}

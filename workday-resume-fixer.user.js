@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Workday Resume Fixer
 // @namespace    https://github.com/austingibb/workday-fixer
-// @version      1.0.0
+// @version      1.0.1
 // @description  Fix Workday's mangled "My Experience" parsing (titles, companies, locations, bullet/newline descriptions) from your clean resume Markdown.
 // @author       Austin Gibbons
 // @match        *://*.myworkdayjobs.com/*
@@ -108,16 +108,96 @@
   // Workday DOM helpers (scoped to the Work Experience section)
   // ---------------------------------------------------------------------------
 
+  const PANEL_SEL = '[data-fkit-id^="workExperience-"][data-fkit-id$="--null"]';
+  // An entry panel belonging to some *other* My Experience section
+  // (education-N--null, languages-N--null, ...).
+  const FOREIGN_SEL =
+    '[data-fkit-id$="--null"]:not([data-fkit-id^="workExperience-"])';
+
+  function myExpPage() {
+    return (
+      document.querySelector('[data-automation-id="applyFlowMyExpPage"]') ||
+      document.body
+    );
+  }
+
+  // Workday derives this section's aria-labelledby id from its heading text,
+  // and that heading is tenant-configurable — "Where have you worked?" on one
+  // company's site, "Work Experience" on another — so matching on the id or
+  // the label text only ever works on the tenant you tested against.
+  //
+  // Instead, climb from the workExperience-* panels to the smallest ancestor
+  // that holds all of them and nothing belonging to a sibling section. That
+  // guard is the important part: My Experience also renders Education,
+  // Languages and Skills, each with its own Add and Delete buttons, and
+  // setPanelCount() deletes from the bottom — an over-wide scope would delete
+  // the applicant's education entry.
   function workSection() {
-    return document.querySelector('[aria-labelledby="Work-Experience-section"]');
+    const page = myExpPage();
+    const panels = [...page.querySelectorAll(PANEL_SEL)];
+    if (!panels.length) return null;
+
+    let best = null;
+    for (let node = panels[0]; node; node = node.parentElement) {
+      if (node.querySelector(FOREIGN_SEL)) break; // reached a shared ancestor
+      if (panels.every((p) => node.contains(p))) {
+        best = node;
+        if (getAddButton(node)) break; // smallest scope owning its own Add
+      }
+      if (node === page) break;
+    }
+    return best;
+  }
+
+  // Only used to bootstrap the zero-entry case. When Workday parsed nothing
+  // from the PDF, Work Experience / Education / Certifications render
+  // identically — same role="group", same add-button, no panels — so the
+  // heading is the only thing telling them apart. Matching on word boundaries
+  // keeps "Social Network URLs" from looking like "work". Whatever this picks
+  // is verified against a real workExperience-* panel before anything is
+  // filled, so a bad guess can't scribble into another section.
+  const WORK_HEADING = /\bwork(ed|ing|s)?\b|\bemploy/i;
+
+  function guessEmptyWorkSection() {
+    const page = myExpPage();
+    return (
+      [...page.querySelectorAll('[aria-labelledby$="-section"]')].find((g) => {
+        const h = document.getElementById(g.getAttribute('aria-labelledby'));
+        return (
+          h &&
+          WORK_HEADING.test(h.textContent || '') &&
+          !g.querySelector(FOREIGN_SEL) &&
+          getAddButton(g)
+        );
+      }) || null
+    );
+  }
+
+  // Panel-anchored lookup first; fall back to opening one entry so there is
+  // something to anchor to, then re-resolve and confirm it really is the work
+  // history section.
+  async function resolveSection() {
+    const found = workSection();
+    if (found) return found;
+
+    const guess = guessEmptyWorkSection();
+    if (!guess) return null;
+
+    getAddButton(guess).click();
+    await sleep(400);
+
+    const confirmed = workSection();
+    if (confirmed) return confirmed;
+
+    // Clicking Add produced no workExperience-* panel, so the heading lied.
+    // Undo it rather than leaving a stray entry behind.
+    const dels = getDeleteButtons(guess);
+    if (dels.length) dels[dels.length - 1].click();
+    return null;
   }
 
   function getPanels(section) {
-    return [
-      ...section.querySelectorAll(
-        '[data-fkit-id^="workExperience-"][data-fkit-id$="--null"]'
-      ),
-    ];
+    return [...section.querySelectorAll(PANEL_SEL)];
   }
 
   function getDeleteButtons(section) {
@@ -127,7 +207,13 @@
   }
 
   function getAddButton(section) {
-    return section.querySelector('button[data-automation-id="add-button"]');
+    return (
+      section.querySelector('button[data-automation-id="add-button"]') ||
+      [...section.querySelectorAll('button')].find((b) =>
+        /^\s*add\b/i.test(b.textContent || '')
+      ) ||
+      null
+    );
   }
 
   async function setPanelCount(section, target, log) {
@@ -172,14 +258,18 @@
   }
 
   async function applyResume(md, log) {
-    const section = workSection();
-    if (!section) {
-      log('Could not find the Work Experience section on this page.');
-      return;
-    }
     const jobs = parseResume(md);
     if (!jobs.length) {
       log('No Experience entries found in that Markdown file.');
+      return;
+    }
+
+    const section = await resolveSection();
+    if (!section) {
+      log(
+        'Could not find the work history section. Click Workday’s "Add" ' +
+          'button under it once, then click this button again.'
+      );
       return;
     }
 
